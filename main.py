@@ -200,6 +200,8 @@ def get_candles(timeframe):
 
     closed = []
     for candle in data:
+        if not isinstance(candle, dict):
+            continue
         if candle.get("complete") is not True:
             continue
         try:
@@ -534,9 +536,11 @@ async def candles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "در حال دریافت کندل‌های XAUUSD...\nلطفاً کمی صبر کن."
     )
     try:
-        results = {}
-        for tf in ("M1", "M5", "M15"):
-            results[tf] = await asyncio.to_thread(get_candles, tf)
+        timeframes = ("M1", "M5", "M15")
+        candle_rows = await asyncio.gather(
+            *(asyncio.to_thread(get_candles, tf) for tf in timeframes)
+        )
+        results = dict(zip(timeframes, candle_rows))
 
         lines = ["🥇 GANJ GOLD | گزارش کندل‌ها", ""]
         for tf in ("M1", "M5", "M15"):
@@ -569,15 +573,13 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "چهار درخواست داده به MarketAPI ارسال می‌شود."
     )
     try:
-        price_task = asyncio.to_thread(get_gold_price)
-        candle_tasks = {
-            tf: asyncio.to_thread(get_candles, tf)
-            for tf in ("M1", "M5", "M15")
-        }
-        p = await price_task
-        candle_results = {}
-        for tf, task in candle_tasks.items():
-            candle_results[tf] = await task
+        timeframes = ("M1", "M5", "M15")
+        fetched = await asyncio.gather(
+            asyncio.to_thread(get_gold_price),
+            *(asyncio.to_thread(get_candles, tf) for tf in timeframes),
+        )
+        p = fetched[0]
+        candle_results = dict(zip(timeframes, fetched[1:]))
 
         result = build_signal(p, candle_results)
         if result["side"] == "WAIT":
