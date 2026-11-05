@@ -6,6 +6,48 @@ from unittest.mock import patch
 import main
 
 
+class HealthCheckCacheTests(unittest.TestCase):
+    def setUp(self):
+        main._health_cache["checked_at"] = 0.0
+        main._health_cache["result"] = None
+
+    def tearDown(self):
+        main._health_cache["checked_at"] = 0.0
+        main._health_cache["result"] = None
+
+    def test_closed_market_result_is_not_cached(self):
+        price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": main.datetime.now(main.timezone.utc).isoformat(),
+            "status": "MARKET_CLOSED",
+        }
+        with patch.object(main, "get_gold_price", return_value=price) as get_price:
+            first = main.get_health_status()
+            second = main.get_health_status()
+
+        self.assertFalse(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(get_price.call_count, 2)
+
+    def test_live_result_is_cached(self):
+        price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": main.datetime.now(main.timezone.utc).isoformat(),
+            "status": "LIVE",
+        }
+        with patch.object(main, "get_gold_price", return_value=price) as get_price:
+            first = main.get_health_status()
+            second = main.get_health_status()
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(get_price.call_count, 1)
+
+
 class ParseTimeTests(unittest.TestCase):
     def test_parses_iso_utc_timestamp(self):
         parsed = main.parse_time("2026-11-05T19:43:00Z")
