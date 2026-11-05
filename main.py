@@ -5,7 +5,7 @@ import logging
 import asyncio
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from telegram import Update
 from telegram.ext import (
@@ -14,37 +14,30 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Logging configuration
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     level=logging.INFO,
 )
 
-# Hide request details and prevent credentials from appearing in routine logs
-for logger_name in (
-    "httpx",
-    "httpcore",
-    "telegram",
-    "telegram.ext",
-    "telegram.request",
-):
-    logging.getLogger(logger_name).setLevel(logging.WARNING)
+for name in ("httpx", "httpcore", "telegram",
+             "telegram.ext", "telegram.request"):
+    logging.getLogger(name).setLevel(logging.WARNING)
 
 logger = logging.getLogger("ganj_gold")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 MARKETAPI_KEY = os.getenv("MARKETAPI_KEY")
 
-API_URL = "https://api.marketapi.app/v1/prices/latest"
+PRICE_URL = "https://api.marketapi.app/v1/prices/latest"
+BARS_URL = "https://api.marketapi.app/v1/bars"
 
 
-def get_gold_price():
+def api_get(url):
     if not MARKETAPI_KEY:
         raise RuntimeError("MARKETAPI_KEY is missing")
 
-    query = urllib.parse.urlencode({"symbols": "XAUUSD"})
     request = urllib.request.Request(
-        f"{API_URL}?{query}",
+        url,
         headers={
             "Authorization": f"Bearer {MARKETAPI_KEY}",
             "Accept": "application/json",
@@ -52,46 +45,72 @@ def get_gold_price():
         method="GET",
     )
 
-    with urllib.request.urlopen(request, timeout=15) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def get_gold_price():
+    query = urllib.parse.urlencode({"symbols": "XAUUSD"})
+    result = api_get(f"{PRICE_URL}?{query}")
 
     data = result.get("data")
+    if not isinstance(data, list) or not data:
+        raise ValueError("No price data returned")
 
-    if isinstance(data, list):
-        if not data:
-            raise ValueError("MarketAPI returned an empty data list")
-        price_data = data[0]
-    elif isinstance(data, dict):
-        price_data = data
-    else:
-        raise ValueError("Unexpected MarketAPI response format")
-
+    p = data[0]
     return {
-        "symbol": price_data.get("symbol", "XAUUSD"),
-        "bid": price_data.get("bid"),
-        "ask": price_data.get("ask"),
-        "time": price_data.get("time", "Unknown"),
-        "status": price_data.get("status", "Unknown"),
+        "symbol": p.get("symbol", "XAUUSD"),
+        "bid": p.get("bid"),
+        "ask": p.get("ask"),
+        "time": p.get("time", "Unknown"),
+        "status": p.get("status", "Unknown"),
     }
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("START command received")
+def get_candles(timeframe):
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=8)
 
+    params = urllib.parse.urlencode({
+        "symbol": "XAUUSD",
+        "timeframe": timeframe,
+        "from": start.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "limit": 50,
+    })
+
+    result = api_get(f"{BARS_URL}?{params}")
+    data = result.get("data")
+
+    if not isinstance(data, list):
+        raise ValueError(f"Unexpected candle response: {timeframe}")
+
+    candles = sorted(
+        data,
+        key=lambda item: item.get("time", "")
+    )
+
+    closed = [
+        c for c in candles
+        if c.get("complete") is True
+    ]
+
+    return closed
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "سلام! به GANJ GOLD خوش آمدی. 🥇\n\n"
         "ربات فعال است.\n\n"
-        "دستورات:\n"
         "/status - وضعیت ربات\n"
         "/price - قیمت زنده طلا\n"
+        "/candles - دریافت کندل‌های M1، M5 و M15\n"
         "/signal - وضعیت سیگنال\n"
         "/help - راهنما"
     )
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("STATUS command received")
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     await update.effective_message.reply_text(
@@ -102,20 +121,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("PRICE command received")
-
     try:
         await update.effective_message.reply_text(
             "در حال دریافت قیمت زنده XAUUSD..."
         )
-        logger.info("PRICE acknowledgement sent; requesting MarketAPI")
 
         p = await asyncio.to_thread(get_gold_price)
-
-        logger.info(
-            "MarketAPI response received; status=%s",
-            p["status"],
-        )
 
         await update.effective_message.reply_text(
             "🥇 GANJ GOLD | قیمت طلا\n\n"
@@ -123,59 +134,91 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Bid: {p['bid']}\n"
             f"Ask: {p['ask']}\n"
             f"وضعیت داده: {p['status']}\n"
-            f"زمان داده: {p['time']}\n\n"
-            "این مرحله فقط آزمایش دریافت قیمت است."
+            f"زمان داده: {p['time']}"
         )
-
-        logger.info("PRICE response sent to Telegram")
 
     except Exception as error:
-        logger.exception(
-            "PRICE command failed; error_type=%s",
-            type(error).__name__,
+        logger.exception("PRICE failed")
+        await update.effective_message.reply_text(
+            f"❌ خطا در دریافت قیمت: {type(error).__name__}"
         )
 
-        try:
-            await update.effective_message.reply_text(
-                "❌ دریافت قیمت ناموفق بود.\n"
-                f"نوع خطا: {type(error).__name__}\n"
-                "لطفاً لاگ سرور را بررسی کنیم."
-            )
-        except Exception:
-            logger.exception("Could not send PRICE error message")
+
+async def candles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = await update.effective_message.reply_text(
+        "در حال دریافت کندل‌های XAUUSD...\n"
+        "لطفاً کمی صبر کن."
+    )
+
+    try:
+        results = {}
+
+        for tf in ("M1", "M5", "M15"):
+            results[tf] = await asyncio.to_thread(get_candles, tf)
+
+        lines = ["🥇 GANJ GOLD | گزارش کندل‌ها", ""]
+
+        for tf in ("M1", "M5", "M15"):
+            rows = results[tf]
+
+            lines.append(f"📊 تایم‌فریم {tf}")
+            lines.append(f"تعداد کندل بسته‌شده: {len(rows)}")
+
+            if not rows:
+                lines.append("⚠️ کندل بسته‌شده‌ای دریافت نشد.")
+                lines.append("")
+                continue
+
+            for c in rows[-3:]:
+                lines.append(
+                    f"\nزمان: {c.get('time', '?')}\n"
+                    f"O: {c.get('open', '?')} | "
+                    f"H: {c.get('high', '?')}\n"
+                    f"L: {c.get('low', '?')} | "
+                    f"C: {c.get('close', '?')}"
+                )
+
+            lines.append("")
+
+        lines.append(
+            "ℹ️ فقط کندل‌های complete=true نمایش داده شده‌اند.\n"
+            "این گزارش هنوز سیگنال معاملاتی نیست."
+        )
+
+        await message.edit_text("\n".join(lines))
+
+    except Exception as error:
+        logger.exception("CANDLES failed")
+        await message.edit_text(
+            "❌ دریافت کندل ناموفق بود.\n"
+            f"نوع خطا: {type(error).__name__}\n"
+            "لطفاً لاگ سرور را بررسی کنیم."
+        )
 
 
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("SIGNAL command received")
-
     await update.effective_message.reply_text(
         "⏸ فعلاً WAIT\n\n"
-        "دریافت و اعتبارسنجی قیمت باید تکمیل شود.\n"
-        "هنوز تحلیل کندل‌های M1، M5 و M15 فعال نیست."
+        "تحلیل M1، M5 و M15 هنوز فعال نشده است."
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("HELP command received")
-
     await update.effective_message.reply_text(
         "GANJ GOLD | راهنما\n\n"
         "/start - شروع\n"
         "/status - وضعیت اتصال\n"
         "/price - قیمت زنده XAUUSD\n"
+        "/candles - دریافت کندل‌ها\n"
         "/signal - وضعیت سیگنال\n"
         "/help - راهنما"
     )
 
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def error_handler(update, context):
     error = context.error
-
     logger.error(
-        "Unhandled Telegram handler error; error_type=%s",
+        "Unhandled handler error: %s",
         type(error).__name__ if error else "Unknown",
         exc_info=error,
     )
@@ -195,12 +238,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("candles", candles))
     app.add_handler(CommandHandler("signal", signal))
     app.add_handler(CommandHandler("help", help_command))
 
     app.add_error_handler(error_handler)
 
-    logger.info("Telegram command handlers registered")
+    logger.info("Telegram handlers registered")
     app.run_polling()
 
 
