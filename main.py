@@ -1,7 +1,8 @@
 import os
 import logging
 from datetime import datetime, timezone
-
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 from telegram import Update
 from telegram.ext import (
     Application,
