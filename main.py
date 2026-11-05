@@ -120,8 +120,11 @@ def get_health_status():
         "age": age,
         "checked_at": now,
     }
-    _health_cache["checked_at"] = now.timestamp()
-    _health_cache["result"] = result
+    # Cache only a genuinely healthy LIVE quote. A closed/stale response
+    # must be rechecked on the next /status request, not hidden for 30 seconds.
+    if live:
+        _health_cache["checked_at"] = now.timestamp()
+        _health_cache["result"] = result
     return result
 
 
