@@ -1,6 +1,7 @@
 import io
 import unittest
 import urllib.error
+from datetime import timedelta
 from unittest.mock import patch
 
 import main
@@ -47,6 +48,62 @@ class HealthCheckCacheTests(unittest.TestCase):
         self.assertTrue(second["ok"])
         self.assertEqual(get_price.call_count, 1)
 
+    def test_cached_live_quote_age_is_recalculated(self):
+        now = main.datetime.now(main.timezone.utc)
+        price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": (now - timedelta(seconds=15)).isoformat(),
+            "status": "LIVE",
+        }
+        main._health_cache["checked_at"] = now.timestamp() - 1
+        main._health_cache["result"] = {
+            "ok": True,
+            "price": price,
+            "age": 1.0,
+            "checked_at": now - timedelta(seconds=1),
+        }
+
+        with patch.object(main, "get_gold_price") as get_price:
+            result = main.get_health_status()
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["age"], 14.0)
+        self.assertLess(result["age"], 20.0)
+        self.assertEqual(get_price.call_count, 0)
+
+    def test_cached_quote_that_has_aged_out_is_refetched(self):
+        now = main.datetime.now(main.timezone.utc)
+        stale_price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": (now - timedelta(seconds=main.MAX_PRICE_AGE_SECONDS + 5)).isoformat(),
+            "status": "LIVE",
+        }
+        fresh_price = {
+            "symbol": "XAUUSD",
+            "bid": 4001.0,
+            "ask": 4001.2,
+            "time": main.datetime.now(main.timezone.utc).isoformat(),
+            "status": "LIVE",
+        }
+        main._health_cache["checked_at"] = now.timestamp() - 1
+        main._health_cache["result"] = {
+            "ok": True,
+            "price": stale_price,
+            "age": 1.0,
+            "checked_at": now - timedelta(seconds=1),
+        }
+
+        with patch.object(main, "get_gold_price", return_value=fresh_price) as get_price:
+            result = main.get_health_status()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["price"], fresh_price)
+        self.assertEqual(get_price.call_count, 1)
+
 
 class ParseTimeTests(unittest.TestCase):
     def test_parses_iso_utc_timestamp(self):
@@ -71,7 +128,6 @@ class IndicatorTests(unittest.TestCase):
 
     def test_atr_returns_none_when_history_is_too_short(self):
         self.assertIsNone(main.atr([], 14))
-
 
 
 class MarketApiPayloadTests(unittest.TestCase):
