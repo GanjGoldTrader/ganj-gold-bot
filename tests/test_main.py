@@ -31,6 +31,46 @@ class IndicatorTests(unittest.TestCase):
         self.assertIsNone(main.atr([], 14))
 
 
+
+class MarketApiPayloadTests(unittest.TestCase):
+    def test_latest_price_accepts_documented_decimal_string_fields(self):
+        payload = {
+            "data": [{
+                "symbol": "XAUUSD",
+                "bid": "4000.10",
+                "ask": "4000.35",
+                "time": "2026-11-05T19:43:00.000Z",
+                "status": "LIVE",
+            }]
+        }
+        with patch.object(main, "api_get", return_value=payload):
+            price = main.get_gold_price()
+
+        self.assertEqual(price["symbol"], "XAUUSD")
+        self.assertAlmostEqual(price["bid"], 4000.10)
+        self.assertAlmostEqual(price["ask"], 4000.35)
+        self.assertEqual(price["status"], "LIVE")
+        self.assertIsNotNone(main.parse_time(price["time"]))
+
+    def test_bars_accepts_documented_ohlc_payload(self):
+        payload = {
+            "data": [{
+                "time": "2026-11-05T19:43:00Z",
+                "open": "4000.00",
+                "high": "4002.00",
+                "low": "3999.50",
+                "close": "4001.25",
+                "complete": True,
+            }]
+        }
+        with patch.object(main, "api_get", return_value=payload):
+            candles = main.get_candles("M1")
+
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0]["close"], 4001.25)
+        self.assertEqual(candles[0]["time"], "2026-11-05T19:43:00Z")
+
+
 class MarketApiErrorTests(unittest.TestCase):
     def test_missing_key_fails_before_network_request(self):
         with patch.object(main, "MARKETAPI_KEY", ""):
