@@ -132,7 +132,7 @@ flowchart TD
 - Repository: `GanjGoldTrader/ganj-gold-bot`; development branch: `codex/diagnostics-healthcheck`.
 - PR #1 is open and draft, base `main`, current development work includes cache-freshness correction (see latest branch head in GitHub); not merged and production deployment not confirmed.
 - PR changes: structured MarketAPI HTTP/network/timeout/response diagnostics; bounded error details and request IDs without logging API key; real `/status` XAUUSD health check; cache only successful LIVE health results for 30 seconds; better `/price` and `/candles` errors; README; tests; GitHub Actions.
-- 15 unit tests are now defined, including four health-cache cases. The latest cache-freshness commit's GitHub Actions run was queued/in progress at the time of this update; verify its final conclusion before relying on it.
+- 15 unit tests are now defined, including four health-cache cases. GitHub Actions completed successfully for commit `c193ea7397da426f6fb25c2ffa6741536638bc3f` (run #16, pull_request event). Re-check CI after subsequent commits.
 - 2026-11-05 runtime: `/price` returned Bid 4088.87, Ask 4089.20, spread 0.33, status MARKET_CLOSED, timestamp 2026-11-05T21:58:59.992Z. Not a live tradable quote.
 - `/candles` returned complete M1/M5/M15 history. `/signal` safely returned WAIT because quote was not LIVE.
 - MarketAPI key was active with scopes read:history, read:latest, read:metadata, read:ohlcv, read:symbols. Never save or repeat the secret.
@@ -184,7 +184,7 @@ flowchart TD
 - Updated `get_health_status()` to recompute quote age on every cache hit and discard/refetch a cached quote once it exceeds the configured freshness limit.
 - Added two regression tests: cached quote age is recalculated; a cached quote that has aged out is fetched again.
 - Code and tests committed on `codex/diagnostics-healthcheck`; latest known commit: `7a729e1e89494dfc395e6d81fba167abea62e7fc`. CI was queued/in progress when this note was written.
-- Status: implemented on development branch; pending CI completion and runtime validation. No signal rules changed.
+- Status: implemented on development branch; CI passed for the documented commit; runtime validation remains pending. No signal rules changed.
 
 ### 2026-11-06 — Permanent project archive requested
 - Owner requested a durable repository document to preserve all prior and future agreements, features, roadmap and flowcharts across chats.
