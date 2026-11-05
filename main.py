@@ -108,8 +108,27 @@ def api_get(url):
 def get_health_status():
     now = datetime.now(timezone.utc)
     checked_at = _health_cache["checked_at"]
-    if _health_cache["result"] is not None and (now.timestamp() - checked_at) < HEALTH_CACHE_SECONDS:
-        return _health_cache["result"]
+    cached = _health_cache["result"]
+
+    if cached is not None and (now.timestamp() - checked_at) < HEALTH_CACHE_SECONDS:
+        cached_price = cached["price"]
+        cached_age = (now - parse_time(cached_price["time"])).total_seconds()
+        cached_is_live = (
+            cached_price["status"].upper() == "LIVE"
+            and -10 <= cached_age <= MAX_PRICE_AGE_SECONDS
+        )
+        if cached_is_live:
+            # Recalculate age on every cache hit. The provider timestamp does
+            # not become newer just because the health result was cached.
+            return {
+                **cached,
+                "age": cached_age,
+            }
+
+        # A cached quote can age out before the cache TTL. Discard it and
+        # perform a fresh provider check rather than reporting stale data LIVE.
+        _health_cache["checked_at"] = 0.0
+        _health_cache["result"] = None
 
     price = get_gold_price()
     age = (now - parse_time(price["time"])).total_seconds()
