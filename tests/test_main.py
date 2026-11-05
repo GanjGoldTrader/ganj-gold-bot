@@ -193,6 +193,16 @@ class CandleSequenceTests(unittest.TestCase):
             ["2026-11-05T19:00:00+00:00", "2026-11-05T19:30:00+00:00"],
         )
 
+    def test_get_candles_skips_non_object_rows(self):
+        payload = {"data": [
+            None,
+            "malformed",
+            {"time": "2026-11-05T19:00:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+        ]}
+        with patch.object(main, "api_get", return_value=payload):
+            candles = main.get_candles("M1")
+        self.assertEqual(len(candles), 1)
+
     def test_get_candles_rejects_duplicate_utc_timestamps(self):
         payload = {"data": [
             {"time": "2026-11-05T19:00:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
