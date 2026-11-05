@@ -198,9 +198,8 @@ def get_candles(timeframe):
     if not isinstance(data, list):
         raise ValueError(f"Unexpected candle response: {timeframe}")
 
-    rows = sorted(data, key=lambda item: item.get("time", ""))
     closed = []
-    for candle in rows:
+    for candle in data:
         if candle.get("complete") is not True:
             continue
         try:
@@ -221,6 +220,13 @@ def get_candles(timeframe):
             closed.append(item)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
+
+    # Sort by normalized UTC instants, not raw timestamp strings: offsets
+    # can make lexical ordering differ from chronological ordering.
+    closed.sort(key=lambda item: item["dt"])
+    for previous, current in zip(closed, closed[1:]):
+        if current["dt"] == previous["dt"]:
+            raise ValueError(f"Timestamp تکراری در کندل‌های {timeframe}: {current['time']}")
     return closed
 
 
@@ -284,6 +290,22 @@ def atr(candles, period=14):
     return value
 
 
+def validate_candle_sequence(candles, timeframe):
+    if timeframe not in TIMEFRAME_MINUTES:
+        raise ValueError(f"تایم‌فریم نامعتبر است: {timeframe}")
+    if len(candles) < 3:
+        raise ValueError(f"حداقل سه کندل برای اعتبارسنجی {timeframe} لازم است")
+
+    expected = timedelta(minutes=TIMEFRAME_MINUTES[timeframe])
+    recent = candles[-3:]
+    for previous, current in zip(recent, recent[1:]):
+        delta = current["dt"] - previous["dt"]
+        if delta <= timedelta(0):
+            raise ValueError(f"ترتیب زمانی کندل‌های {timeframe} صعودی نیست یا زمان تکراری دارد")
+        if delta != expected:
+            raise ValueError(f"بین سه کندل اخیر {timeframe} شکاف زمانی وجود دارد")
+
+
 def check_freshness(price, candles_by_tf):
     now = datetime.now(timezone.utc)
     if price["status"].upper() != "LIVE":
@@ -293,9 +315,14 @@ def check_freshness(price, candles_by_tf):
     if price_age < -10 or price_age > MAX_PRICE_AGE_SECONDS:
         raise ValueError(f"قیمت قدیمی است؛ عمر داده {int(price_age)} ثانیه")
 
-    for tf, candles in candles_by_tf.items():
+    required_timeframes = ("M1", "M5", "M15")
+    for tf in required_timeframes:
+        if tf not in candles_by_tf:
+            raise ValueError(f"داده تایم‌فریم الزامی {tf} موجود نیست")
+        candles = candles_by_tf[tf]
         if not candles:
             raise ValueError(f"کندل {tf} موجود نیست")
+        validate_candle_sequence(candles, tf)
         last = candles[-1]
         candle_close_time = last["dt"] + timedelta(minutes=TIMEFRAME_MINUTES[tf])
         age = (now - candle_close_time).total_seconds()
