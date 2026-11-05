@@ -169,6 +169,80 @@ class MarketApiPayloadTests(unittest.TestCase):
         self.assertEqual(candles[0]["time"], "2026-11-05T19:43:00Z")
 
 
+class CandleSequenceTests(unittest.TestCase):
+    @staticmethod
+    def candle(timestamp):
+        return {
+            "time": timestamp,
+            "dt": main.parse_time(timestamp),
+            "open": 4000.0,
+            "high": 4002.0,
+            "low": 3998.0,
+            "close": 4001.0,
+        }
+
+    def test_get_candles_sorts_by_utc_instant_not_timestamp_text(self):
+        payload = {"data": [
+            {"time": "2026-11-05T19:30:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+            {"time": "2026-11-05T20:00:00+01:00", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+        ]}
+        with patch.object(main, "api_get", return_value=payload):
+            candles = main.get_candles("M1")
+        self.assertEqual(
+            [item["dt"].isoformat() for item in candles],
+            ["2026-11-05T19:00:00+00:00", "2026-11-05T19:30:00+00:00"],
+        )
+
+    def test_get_candles_rejects_duplicate_utc_timestamps(self):
+        payload = {"data": [
+            {"time": "2026-11-05T19:00:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+            {"time": "2026-11-05T20:00:00+01:00", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+        ]}
+        with patch.object(main, "api_get", return_value=payload):
+            with self.assertRaisesRegex(ValueError, "تکراری"):
+                main.get_candles("M1")
+
+    def test_recent_m1_gap_is_rejected(self):
+        candles = [
+            self.candle("2026-11-05T19:00:00Z"),
+            self.candle("2026-11-05T19:01:00Z"),
+            self.candle("2026-11-05T19:03:00Z"),
+        ]
+        with self.assertRaisesRegex(ValueError, "شکاف"):
+            main.validate_candle_sequence(candles, "M1")
+
+    def test_old_historical_gap_is_allowed_when_last_three_are_contiguous(self):
+        candles = [
+            self.candle("2026-11-05T18:00:00Z"),
+            self.candle("2026-11-05T18:10:00Z"),
+            self.candle("2026-11-05T18:11:00Z"),
+            self.candle("2026-11-05T18:12:00Z"),
+        ]
+        main.validate_candle_sequence(candles, "M1")
+
+    def test_m5_requires_exact_five_minute_spacing(self):
+        candles = [
+            self.candle("2026-11-05T19:00:00Z"),
+            self.candle("2026-11-05T19:05:00Z"),
+            self.candle("2026-11-05T19:10:00Z"),
+        ]
+        main.validate_candle_sequence(candles, "M5")
+
+    def test_freshness_requires_all_three_timeframes(self):
+        now = main.datetime.now(main.timezone.utc)
+        price = {
+            "status": "LIVE",
+            "time": now.isoformat(),
+        }
+        m1 = [
+            self.candle((now - main.timedelta(minutes=3)).isoformat()),
+            self.candle((now - main.timedelta(minutes=2)).isoformat()),
+            self.candle((now - main.timedelta(minutes=1)).isoformat()),
+        ]
+        with self.assertRaisesRegex(ValueError, "M5"):
+            main.check_freshness(price, {"M1": m1, "M15": []})
+
+
 class MarketApiErrorTests(unittest.TestCase):
     def test_missing_key_fails_before_network_request(self):
         with patch.object(main, "MARKETAPI_KEY", ""):
