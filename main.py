@@ -76,7 +76,7 @@ def get_candles(timeframe):
         "timeframe": timeframe,
         "from": start.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "to": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "limit": 50,
+        "limit": 1000,
     })
 
     result = api_get(f"{BARS_URL}?{params}")
