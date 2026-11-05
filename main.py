@@ -474,7 +474,9 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
         logger.exception("PRICE failed")
         await update.effective_message.reply_text(
-            f"❌ خطا در دریافت قیمت: {type(error).__name__}"
+            "❌ خطا در دریافت قیمت زنده XAUUSD.\n"
+            f"جزئیات: {str(error)[:350]}\n"
+            "تا تأیید اتصال و تازگی داده، از این قیمت برای معامله استفاده نکن."
         )
 
 
@@ -508,7 +510,7 @@ async def candles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("CANDLES failed")
         await message.edit_text(
             "❌ دریافت کندل ناموفق بود.\n"
-            f"نوع خطا: {type(error).__name__}"
+            f"جزئیات: {str(error)[:350]}"
         )
 
 
