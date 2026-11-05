@@ -130,9 +130,9 @@ flowchart TD
 
 ## 9. Current implementation status (last known 2026-11-06)
 - Repository: `GanjGoldTrader/ganj-gold-bot`; development branch: `codex/diagnostics-healthcheck`.
-- PR #1 is open and draft, base `main`, last known head `6a0ed81edeab2a56fa3dc76f17a384ff2b95dace`; not merged and production deployment not confirmed.
+- PR #1 is open and draft, base `main`, current development work includes cache-freshness correction (see latest branch head in GitHub); not merged and production deployment not confirmed.
 - PR changes: structured MarketAPI HTTP/network/timeout/response diagnostics; bounded error details and request IDs without logging API key; real `/status` XAUUSD health check; cache only successful LIVE health results for 30 seconds; better `/price` and `/candles` errors; README; tests; GitHub Actions.
-- 13 tests were reported passing on the latest known PR workflow after two cache-behavior tests were added. Re-check current CI before relying on this.
+- 15 unit tests are now defined, including four health-cache cases. The latest cache-freshness commit's GitHub Actions run was queued/in progress at the time of this update; verify its final conclusion before relying on it.
 - 2026-11-05 runtime: `/price` returned Bid 4088.87, Ask 4089.20, spread 0.33, status MARKET_CLOSED, timestamp 2026-11-05T21:58:59.992Z. Not a live tradable quote.
 - `/candles` returned complete M1/M5/M15 history. `/signal` safely returned WAIT because quote was not LIVE.
 - MarketAPI key was active with scopes read:history, read:latest, read:metadata, read:ohlcv, read:symbols. Never save or repeat the secret.
@@ -179,6 +179,13 @@ flowchart TD
 - Backtest with realistic spread, slippage, fees, latency, chronological splits, walk-forward and out-of-sample testing. Report sample size, expectancy, drawdown, profit factor, and cost sensitivity. Paper-observe before performance claims.
 
 ## 12. Project archive / decision log (newest first)
+### 2026-11-06 — Cached quote freshness correction
+- Static review found that a cached LIVE health result reused its original quote-age value, which could understate the true age of the quote.
+- Updated `get_health_status()` to recompute quote age on every cache hit and discard/refetch a cached quote once it exceeds the configured freshness limit.
+- Added two regression tests: cached quote age is recalculated; a cached quote that has aged out is fetched again.
+- Code and tests committed on `codex/diagnostics-healthcheck`; latest known commit: `7a729e1e89494dfc395e6d81fba167abea62e7fc`. CI was queued/in progress when this note was written.
+- Status: implemented on development branch; pending CI completion and runtime validation. No signal rules changed.
+
 ### 2026-11-06 — Permanent project archive requested
 - Owner requested a durable repository document to preserve all prior and future agreements, features, roadmap and flowcharts across chats.
 - Owner requested a closing routine: archive new decisions, requirements and work items at the end of each substantial project conversation.
