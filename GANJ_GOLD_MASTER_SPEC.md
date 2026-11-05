@@ -132,7 +132,7 @@ flowchart TD
 - Repository: `GanjGoldTrader/ganj-gold-bot`; development branch: `codex/diagnostics-healthcheck`.
 - PR #1 is open and draft, base `main`, current development work includes cache-freshness correction (see latest branch head in GitHub); not merged and production deployment not confirmed.
 - PR changes: structured MarketAPI HTTP/network/timeout/response diagnostics; bounded error details and request IDs without logging API key; real `/status` XAUUSD health check; cache only successful LIVE health results for 30 seconds; better `/price` and `/candles` errors; README; tests; GitHub Actions.
-- 22 unit tests are now defined, including four health-cache cases, six candle-order/continuity regressions, and malformed-row handling. The earlier successful Actions run #19 predates the candle-validation commits; CI must be checked on the current HEAD. GitHub Actions completed successfully for commit `c193ea7397da426f6fb25c2ffa6741536638bc3f` (run #16, pull_request event). Re-check CI after subsequent commits.
+- 22 unit tests are now defined, including four health-cache cases, six candle-order/continuity regressions, and malformed-row handling. GitHub Actions run #30 completed successfully on current HEAD f3abccbd4a8e7271ee73765bbca1ea8a62fca357 (compile and unit tests green). GitHub Actions completed successfully for commit `c193ea7397da426f6fb25c2ffa6741536638bc3f` (run #16, pull_request event). Re-check CI after subsequent commits.
 - 2026-11-05 runtime: `/price` returned Bid 4088.87, Ask 4089.20, spread 0.33, status MARKET_CLOSED, timestamp 2026-11-05T21:58:59.992Z. Not a live tradable quote.
 - `/candles` returned complete M1/M5/M15 history. `/signal` safely returned WAIT because quote was not LIVE.
 - MarketAPI key was active with scopes read:history, read:latest, read:metadata, read:ohlcv, read:symbols. Never save or repeat the secret.
@@ -225,6 +225,16 @@ flowchart TD
 - Added one regression test for malformed non-object candle rows. Test count is now 22.
 - Commits: handler/data robustness change 33f473eeb7f6fe735ba58f831a8a19434216f083; regression test 4ba3fdb15501d274e035a7ac86c426de3e115d32.
 - Status: changes committed to development branch; CI on the latest HEAD is pending. No production deployment, merge, or automatic trade execution has been performed.
+
+
+
+### 2026-11-06 — CI confirmation and real-host deployment boundary
+- Verified GitHub Actions run #30 for current development HEAD f3abccbd4a8e7271ee73765bbca1ea8a62fca357: completed successfully; compile and unit-test steps passed. Current suite contains 22 tests.
+- PR #1 metadata updated to describe UTC ordering/continuity validation, malformed-row handling, concurrent quote/candle retrieval, and 22-test suite. PR remains open and draft; no merge.
+- Retrieved prior deployment context: actual host is Blitz Cloud, app name ganj-gold, previously Online and manually deployed from GitHub main (last previously observed deployed commit dd69dd0). Deployment flow previously required “Build the newest code” and then restart if prompted; environment variables are configured in Blitz Environment. This is historical context, not a live host status check.
+- Repository tree has a root Dockerfile. No Blitz-specific connector or deployment tool is available in this session, and no current live-host access/runtime logs are available. Therefore current branch changes have NOT yet been deployed to Blitz. Do not claim the real Telegram bot is running this HEAD.
+- Safe next deployment path requires either (a) using Blitz UI to point the existing app at codex/diagnostics-healthcheck and build the newest code, or (b) merge PR #1 after required runtime acceptance and then use Blitz’s manual build/restart flow. Prefer branch-based staging if Blitz supports it; do not replace production blindly.
+- Release status: code changes and 22 unit tests committed; CI passed; live MarketAPI/Telegram runtime verification during an open market session is still pending. Analysis-only; no automatic order placement.
 
 ## 13. Open decisions
 - Confirm exact broker/provider behind MarketAPI XAUUSD and its current official session calendar.
