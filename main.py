@@ -5,6 +5,7 @@ import asyncio
 import math
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update
@@ -44,11 +45,21 @@ MAX_TARGET_USD = 10.0
 REWARD_RISK = 1.5
 MIN_STOP_USD = MIN_TARGET_USD / REWARD_RISK
 MAX_STOP_USD = MAX_TARGET_USD / REWARD_RISK
+HEALTH_CACHE_SECONDS = 30
+_health_cache = {"checked_at": 0.0, "result": None}
+
+
+class MarketAPIError(RuntimeError):
+    def __init__(self, message, status_code=None, error_code=None, request_id=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
 
 
 def api_get(url):
     if not MARKETAPI_KEY:
-        raise RuntimeError("MARKETAPI_KEY is missing")
+        raise MarketAPIError("کلید MARKETAPI_KEY در تنظیمات سرور وجود ندارد.")
 
     request = urllib.request.Request(
         url,
@@ -58,8 +69,60 @@ def api_get(url):
         },
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raw = error.read(4096).decode("utf-8", errors="replace")
+        try:
+            problem = json.loads(raw)
+        except (TypeError, ValueError):
+            problem = {}
+        code = problem.get("code")
+        detail = str(problem.get("detail") or problem.get("title") or "")[:220]
+        request_id = problem.get("request_id")
+        logger.error(
+            "MarketAPI HTTP error status=%s code=%s request_id=%s detail=%s",
+            error.code, code, request_id, detail
+        )
+        message = f"MarketAPI HTTP {error.code}"
+        if code:
+            message += f" ({code})"
+        if detail:
+            message += f": {detail}"
+        if request_id:
+            message += f" | request_id={request_id}"
+        raise MarketAPIError(message, error.code, code, request_id) from None
+    except urllib.error.URLError as error:
+        reason = str(getattr(error, "reason", "network error"))[:160]
+        logger.error("MarketAPI connection error: %s", reason)
+        raise MarketAPIError(f"ارتباط با MarketAPI برقرار نشد: {reason}") from None
+    except TimeoutError:
+        logger.error("MarketAPI request timed out")
+        raise MarketAPIError("مهلت پاسخ MarketAPI تمام شد (timeout).") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        logger.error("MarketAPI returned invalid JSON: %s", type(error).__name__)
+        raise MarketAPIError("پاسخ MarketAPI معتبر نیست.") from None
+
+
+def get_health_status():
+    now = datetime.now(timezone.utc)
+    checked_at = _health_cache["checked_at"]
+    if _health_cache["result"] is not None and (now.timestamp() - checked_at) < HEALTH_CACHE_SECONDS:
+        return _health_cache["result"]
+
+    price = get_gold_price()
+    age = (now - parse_time(price["time"])).total_seconds()
+    live = price["status"].upper() == "LIVE" and -10 <= age <= MAX_PRICE_AGE_SECONDS
+    result = {
+        "ok": live,
+        "price": price,
+        "age": age,
+        "checked_at": now,
+    }
+    _health_cache["checked_at"] = now.timestamp()
+    _health_cache["result"] = result
+    return result
 
 
 def parse_time(value):
@@ -370,13 +433,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    await update.effective_message.reply_text(
-        "🟢 GANJ GOLD فعال است.\n"
-        f"زمان سرور: {now}\n"
-        f"کلید MarketAPI: {'تنظیم شده' if MARKETAPI_KEY else 'تنظیم نشده'}\n"
-        "موتور تحلیل: نسخه آزمایشی v1"
-    )
+    message = await update.effective_message.reply_text("🔎 در حال بررسی اتصال MarketAPI...")
+    try:
+        health = await asyncio.to_thread(get_health_status)
+        p = health["price"]
+        state = "🟢 قیمت زنده و به‌روز" if health["ok"] else "🟠 API پاسخ داد، اما قیمت LIVE یا تازه نیست"
+        await message.edit_text(
+            "🥇 GANJ GOLD | وضعیت سامانه\n\n"
+            f"ربات تلگرام: 🟢 فعال\n"
+            f"MarketAPI: {state}\n"
+            f"نماد: {p['symbol']}\n"
+            f"Bid / Ask: {p['bid']:.2f} / {p['ask']:.2f}\n"
+            f"وضعیت منبع: {p['status']}\n"
+            f"سن قیمت: {health['age']:.0f} ثانیه\n"
+            f"آخرین بررسی: {health['checked_at'].strftime('%H:%M:%S UTC')}\n"
+            "موتور تحلیل: نسخه آزمایشی v1"
+        )
+    except Exception as error:
+        logger.exception("STATUS health check failed")
+        await message.edit_text(
+            "🔴 GANJ GOLD فعال است، اما اتصال قیمت تأیید نشد.\n\n"
+            f"خطا: {str(error)[:350]}\n"
+            "تا رفع خطا، به سیگنال‌های معاملاتی اعتماد نکن."
+        )
 
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
