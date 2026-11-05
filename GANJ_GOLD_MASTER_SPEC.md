@@ -132,7 +132,7 @@ flowchart TD
 - Repository: `GanjGoldTrader/ganj-gold-bot`; development branch: `codex/diagnostics-healthcheck`.
 - PR #1 is open and draft, base `main`, current development work includes cache-freshness correction (see latest branch head in GitHub); not merged and production deployment not confirmed.
 - PR changes: structured MarketAPI HTTP/network/timeout/response diagnostics; bounded error details and request IDs without logging API key; real `/status` XAUUSD health check; cache only successful LIVE health results for 30 seconds; better `/price` and `/candles` errors; README; tests; GitHub Actions.
-- 21 unit tests are now defined, including four health-cache cases and six candle-order/continuity regressions. The earlier successful Actions run #19 predates the candle-validation commits; CI must be checked on the current HEAD. GitHub Actions completed successfully for commit `c193ea7397da426f6fb25c2ffa6741536638bc3f` (run #16, pull_request event). Re-check CI after subsequent commits.
+- 22 unit tests are now defined, including four health-cache cases, six candle-order/continuity regressions, and malformed-row handling. The earlier successful Actions run #19 predates the candle-validation commits; CI must be checked on the current HEAD. GitHub Actions completed successfully for commit `c193ea7397da426f6fb25c2ffa6741536638bc3f` (run #16, pull_request event). Re-check CI after subsequent commits.
 - 2026-11-05 runtime: `/price` returned Bid 4088.87, Ask 4089.20, spread 0.33, status MARKET_CLOSED, timestamp 2026-11-05T21:58:59.992Z. Not a live tradable quote.
 - `/candles` returned complete M1/M5/M15 history. `/signal` safely returned WAIT because quote was not LIVE.
 - MarketAPI key was active with scopes read:history, read:latest, read:metadata, read:ohlcv, read:symbols. Never save or repeat the secret.
@@ -215,6 +215,16 @@ flowchart TD
 - Added six regression tests: UTC ordering across differing offsets; duplicate UTC instant rejection; recent M1 gap rejection; allowance for an older historical gap; exact M5 spacing; and missing required timeframe rejection.
 - GitHub accepted both code updates on codex/diagnostics-healthcheck: main.py commit 5cd04ba8b9a295d7b21816d7d5f657260decd9d7; tests commit 4c568932bc8f73f880392fcfcd5edb4f32302141. Current test count is 21 (15 existing + 6 new).
 - Status: code and regression tests committed to development branch; execution/CI validation on the new HEAD is pending. Do not merge or deploy. Existing CI success #19 applies only to the earlier commit.
+
+
+
+### 2026-11-06 — Concurrent market snapshot and malformed candle-row resilience
+- Re-checked Actions run #24 for commit 5647eb55b47ce7f09d08ce73875a5df0dc6c6242: completed successfully (compile and unit-test job green).
+- Static review of Telegram handlers found that /signal created asyncio.to_thread coroutines but awaited them one by one, so the four MarketAPI requests were effectively sequential despite the user-facing message. Updated /signal to await the quote and three timeframe fetches together with asyncio.gather; updated /candles to fetch M1/M5/M15 concurrently as well.
+- Hardened get_candles() to skip non-dictionary rows in otherwise valid provider arrays rather than aborting the whole candle response.
+- Added one regression test for malformed non-object candle rows. Test count is now 22.
+- Commits: handler/data robustness change 33f473eeb7f6fe735ba58f831a8a19434216f083; regression test 4ba3fdb15501d274e035a7ac86c426de3e115d32.
+- Status: changes committed to development branch; CI on the latest HEAD is pending. No production deployment, merge, or automatic trade execution has been performed.
 
 ## 13. Open decisions
 - Confirm exact broker/provider behind MarketAPI XAUUSD and its current official session calendar.
