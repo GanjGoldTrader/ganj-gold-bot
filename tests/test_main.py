@@ -1,0 +1,297 @@
+import io
+import unittest
+import urllib.error
+from datetime import timedelta
+from unittest.mock import patch
+
+import main
+
+
+class HealthCheckCacheTests(unittest.TestCase):
+    def setUp(self):
+        main._health_cache["checked_at"] = 0.0
+        main._health_cache["result"] = None
+
+    def tearDown(self):
+        main._health_cache["checked_at"] = 0.0
+        main._health_cache["result"] = None
+
+    def test_closed_market_result_is_not_cached(self):
+        price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": main.datetime.now(main.timezone.utc).isoformat(),
+            "status": "MARKET_CLOSED",
+        }
+        with patch.object(main, "get_gold_price", return_value=price) as get_price:
+            first = main.get_health_status()
+            second = main.get_health_status()
+
+        self.assertFalse(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(get_price.call_count, 2)
+
+    def test_live_result_is_cached(self):
+        price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": main.datetime.now(main.timezone.utc).isoformat(),
+            "status": "LIVE",
+        }
+        with patch.object(main, "get_gold_price", return_value=price) as get_price:
+            first = main.get_health_status()
+            second = main.get_health_status()
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(get_price.call_count, 1)
+
+    def test_cached_live_quote_age_is_recalculated(self):
+        now = main.datetime.now(main.timezone.utc)
+        price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": (now - timedelta(seconds=15)).isoformat(),
+            "status": "LIVE",
+        }
+        main._health_cache["checked_at"] = now.timestamp() - 1
+        main._health_cache["result"] = {
+            "ok": True,
+            "price": price,
+            "age": 1.0,
+            "checked_at": now - timedelta(seconds=1),
+        }
+
+        with patch.object(main, "get_gold_price") as get_price:
+            result = main.get_health_status()
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["age"], 14.0)
+        self.assertLess(result["age"], 20.0)
+        self.assertEqual(get_price.call_count, 0)
+
+    def test_cached_quote_that_has_aged_out_is_refetched(self):
+        now = main.datetime.now(main.timezone.utc)
+        stale_price = {
+            "symbol": "XAUUSD",
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "time": (now - timedelta(seconds=main.MAX_PRICE_AGE_SECONDS + 5)).isoformat(),
+            "status": "LIVE",
+        }
+        fresh_price = {
+            "symbol": "XAUUSD",
+            "bid": 4001.0,
+            "ask": 4001.2,
+            "time": main.datetime.now(main.timezone.utc).isoformat(),
+            "status": "LIVE",
+        }
+        main._health_cache["checked_at"] = now.timestamp() - 1
+        main._health_cache["result"] = {
+            "ok": True,
+            "price": stale_price,
+            "age": 1.0,
+            "checked_at": now - timedelta(seconds=1),
+        }
+
+        with patch.object(main, "get_gold_price", return_value=fresh_price) as get_price:
+            result = main.get_health_status()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["price"], fresh_price)
+        self.assertEqual(get_price.call_count, 1)
+
+
+class ParseTimeTests(unittest.TestCase):
+    def test_parses_iso_utc_timestamp(self):
+        parsed = main.parse_time("2026-11-05T19:43:00Z")
+        self.assertEqual(parsed.isoformat(), "2026-11-05T19:43:00+00:00")
+
+    def test_parses_unix_seconds(self):
+        parsed = main.parse_time(1793907780)
+        self.assertEqual(parsed.tzinfo, main.timezone.utc)
+
+    def test_rejects_missing_timestamp(self):
+        with self.assertRaises(ValueError):
+            main.parse_time(None)
+
+
+class IndicatorTests(unittest.TestCase):
+    def test_ema_uses_seed_average_and_smoothing(self):
+        self.assertAlmostEqual(main.ema([1, 2, 3, 4], 3), 3.0)
+
+    def test_rsi_is_100_for_only_gains(self):
+        self.assertEqual(main.rsi(list(range(1, 17)), 14), 100.0)
+
+    def test_atr_returns_none_when_history_is_too_short(self):
+        self.assertIsNone(main.atr([], 14))
+
+
+class MarketApiPayloadTests(unittest.TestCase):
+    def test_latest_price_accepts_documented_decimal_string_fields(self):
+        payload = {
+            "data": [{
+                "symbol": "XAUUSD",
+                "bid": "4000.10",
+                "ask": "4000.35",
+                "time": "2026-11-05T19:43:00.000Z",
+                "status": "LIVE",
+            }]
+        }
+        with patch.object(main, "api_get", return_value=payload):
+            price = main.get_gold_price()
+
+        self.assertEqual(price["symbol"], "XAUUSD")
+        self.assertAlmostEqual(price["bid"], 4000.10)
+        self.assertAlmostEqual(price["ask"], 4000.35)
+        self.assertEqual(price["status"], "LIVE")
+        self.assertIsNotNone(main.parse_time(price["time"]))
+
+    def test_bars_accepts_documented_ohlc_payload(self):
+        payload = {
+            "data": [{
+                "time": "2026-11-05T19:43:00Z",
+                "open": "4000.00",
+                "high": "4002.00",
+                "low": "3999.50",
+                "close": "4001.25",
+                "complete": True,
+            }]
+        }
+        with patch.object(main, "api_get", return_value=payload):
+            candles = main.get_candles("M1")
+
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0]["close"], 4001.25)
+        self.assertEqual(candles[0]["time"], "2026-11-05T19:43:00Z")
+
+
+class CandleSequenceTests(unittest.TestCase):
+    @staticmethod
+    def candle(timestamp):
+        return {
+            "time": timestamp,
+            "dt": main.parse_time(timestamp),
+            "open": 4000.0,
+            "high": 4002.0,
+            "low": 3998.0,
+            "close": 4001.0,
+        }
+
+    def test_get_candles_sorts_by_utc_instant_not_timestamp_text(self):
+        payload = {"data": [
+            {"time": "2026-11-05T19:30:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+            {"time": "2026-11-05T20:00:00+01:00", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+        ]}
+        with patch.object(main, "api_get", return_value=payload):
+            candles = main.get_candles("M1")
+        self.assertEqual(
+            [item["dt"].isoformat() for item in candles],
+            ["2026-11-05T19:00:00+00:00", "2026-11-05T19:30:00+00:00"],
+        )
+
+    def test_get_candles_skips_non_object_rows(self):
+        payload = {"data": [
+            None,
+            "malformed",
+            {"time": "2026-11-05T19:00:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+        ]}
+        with patch.object(main, "api_get", return_value=payload):
+            candles = main.get_candles("M1")
+        self.assertEqual(len(candles), 1)
+
+    def test_get_candles_rejects_duplicate_utc_timestamps(self):
+        payload = {"data": [
+            {"time": "2026-11-05T19:00:00Z", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+            {"time": "2026-11-05T20:00:00+01:00", "open": "4000", "high": "4002", "low": "3998", "close": "4001", "complete": True},
+        ]}
+        with patch.object(main, "api_get", return_value=payload):
+            with self.assertRaisesRegex(ValueError, "تکراری"):
+                main.get_candles("M1")
+
+    def test_recent_m1_gap_is_rejected(self):
+        candles = [
+            self.candle("2026-11-05T19:00:00Z"),
+            self.candle("2026-11-05T19:01:00Z"),
+            self.candle("2026-11-05T19:03:00Z"),
+        ]
+        with self.assertRaisesRegex(ValueError, "شکاف"):
+            main.validate_candle_sequence(candles, "M1")
+
+    def test_old_historical_gap_is_allowed_when_last_three_are_contiguous(self):
+        candles = [
+            self.candle("2026-11-05T18:00:00Z"),
+            self.candle("2026-11-05T18:10:00Z"),
+            self.candle("2026-11-05T18:11:00Z"),
+            self.candle("2026-11-05T18:12:00Z"),
+        ]
+        main.validate_candle_sequence(candles, "M1")
+
+    def test_m5_requires_exact_five_minute_spacing(self):
+        candles = [
+            self.candle("2026-11-05T19:00:00Z"),
+            self.candle("2026-11-05T19:05:00Z"),
+            self.candle("2026-11-05T19:10:00Z"),
+        ]
+        main.validate_candle_sequence(candles, "M5")
+
+    def test_freshness_requires_all_three_timeframes(self):
+        now = main.datetime.now(main.timezone.utc)
+        price = {
+            "status": "LIVE",
+            "time": now.isoformat(),
+        }
+        m1 = [
+            self.candle((now - main.timedelta(minutes=3)).isoformat()),
+            self.candle((now - main.timedelta(minutes=2)).isoformat()),
+            self.candle((now - main.timedelta(minutes=1)).isoformat()),
+        ]
+        with self.assertRaisesRegex(ValueError, "M5"):
+            main.check_freshness(price, {"M1": m1, "M15": []})
+
+
+class MarketApiErrorTests(unittest.TestCase):
+    def test_missing_key_fails_before_network_request(self):
+        with patch.object(main, "MARKETAPI_KEY", ""):
+            with self.assertRaisesRegex(main.MarketAPIError, "MARKETAPI_KEY"):
+                main.api_get("https://example.invalid")
+
+    def test_http_error_preserves_status_and_api_code(self):
+        body = io.BytesIO(
+            b'{"code":"invalid_api_key","detail":"API key rejected","request_id":"req-test"}'
+        )
+        error = urllib.error.HTTPError(
+            "https://api.marketapi.app/test",
+            401,
+            "Unauthorized",
+            {},
+            body,
+        )
+        with patch.object(main.urllib.request, "urlopen", side_effect=error):
+            with patch.object(main, "MARKETAPI_KEY", "test-secret"):
+                with self.assertRaises(main.MarketAPIError) as caught:
+                    main.api_get("https://api.marketapi.app/test")
+
+        self.assertEqual(caught.exception.status_code, 401)
+        self.assertEqual(caught.exception.error_code, "invalid_api_key")
+        self.assertIn("req-test", str(caught.exception))
+        self.assertNotIn("test-secret", str(caught.exception))
+
+    def test_network_error_is_reported_as_market_api_error(self):
+        with patch.object(main, "MARKETAPI_KEY", "test-secret"):
+            with patch.object(
+                main.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError("connection refused"),
+            ):
+                with self.assertRaises(main.MarketAPIError) as caught:
+                    main.api_get("https://api.marketapi.app/test")
+
+        self.assertIn("ارتباط", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

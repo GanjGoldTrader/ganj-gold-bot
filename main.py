@@ -5,6 +5,7 @@ import asyncio
 import math
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update
@@ -44,11 +45,21 @@ MAX_TARGET_USD = 10.0
 REWARD_RISK = 1.5
 MIN_STOP_USD = MIN_TARGET_USD / REWARD_RISK
 MAX_STOP_USD = MAX_TARGET_USD / REWARD_RISK
+HEALTH_CACHE_SECONDS = 30
+_health_cache = {"checked_at": 0.0, "result": None}
+
+
+class MarketAPIError(RuntimeError):
+    def __init__(self, message, status_code=None, error_code=None, request_id=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
 
 
 def api_get(url):
     if not MARKETAPI_KEY:
-        raise RuntimeError("MARKETAPI_KEY is missing")
+        raise MarketAPIError("کلید MARKETAPI_KEY در تنظیمات سرور وجود ندارد.")
 
     request = urllib.request.Request(
         url,
@@ -58,8 +69,82 @@ def api_get(url):
         },
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raw = error.read(4096).decode("utf-8", errors="replace")
+        try:
+            problem = json.loads(raw)
+        except (TypeError, ValueError):
+            problem = {}
+        code = problem.get("code")
+        detail = str(problem.get("detail") or problem.get("title") or "")[:220]
+        request_id = problem.get("request_id")
+        logger.error(
+            "MarketAPI HTTP error status=%s code=%s request_id=%s detail=%s",
+            error.code, code, request_id, detail
+        )
+        message = f"MarketAPI HTTP {error.code}"
+        if code:
+            message += f" ({code})"
+        if detail:
+            message += f": {detail}"
+        if request_id:
+            message += f" | request_id={request_id}"
+        raise MarketAPIError(message, error.code, code, request_id) from None
+    except urllib.error.URLError as error:
+        reason = str(getattr(error, "reason", "network error"))[:160]
+        logger.error("MarketAPI connection error: %s", reason)
+        raise MarketAPIError(f"ارتباط با MarketAPI برقرار نشد: {reason}") from None
+    except TimeoutError:
+        logger.error("MarketAPI request timed out")
+        raise MarketAPIError("مهلت پاسخ MarketAPI تمام شد (timeout).") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        logger.error("MarketAPI returned invalid JSON: %s", type(error).__name__)
+        raise MarketAPIError("پاسخ MarketAPI معتبر نیست.") from None
+
+
+def get_health_status():
+    now = datetime.now(timezone.utc)
+    checked_at = _health_cache["checked_at"]
+    cached = _health_cache["result"]
+
+    if cached is not None and (now.timestamp() - checked_at) < HEALTH_CACHE_SECONDS:
+        cached_price = cached["price"]
+        cached_age = (now - parse_time(cached_price["time"])).total_seconds()
+        cached_is_live = (
+            cached_price["status"].upper() == "LIVE"
+            and -10 <= cached_age <= MAX_PRICE_AGE_SECONDS
+        )
+        if cached_is_live:
+            # Recalculate age on every cache hit. The provider timestamp does
+            # not become newer just because the health result was cached.
+            return {
+                **cached,
+                "age": cached_age,
+            }
+
+        # A cached quote can age out before the cache TTL. Discard it and
+        # perform a fresh provider check rather than reporting stale data LIVE.
+        _health_cache["checked_at"] = 0.0
+        _health_cache["result"] = None
+
+    price = get_gold_price()
+    age = (now - parse_time(price["time"])).total_seconds()
+    live = price["status"].upper() == "LIVE" and -10 <= age <= MAX_PRICE_AGE_SECONDS
+    result = {
+        "ok": live,
+        "price": price,
+        "age": age,
+        "checked_at": now,
+    }
+    # Cache only a genuinely healthy LIVE quote. A closed/stale response
+    # must be rechecked on the next /status request, not hidden for 30 seconds.
+    if live:
+        _health_cache["checked_at"] = now.timestamp()
+        _health_cache["result"] = result
+    return result
 
 
 def parse_time(value):
@@ -113,9 +198,10 @@ def get_candles(timeframe):
     if not isinstance(data, list):
         raise ValueError(f"Unexpected candle response: {timeframe}")
 
-    rows = sorted(data, key=lambda item: item.get("time", ""))
     closed = []
-    for candle in rows:
+    for candle in data:
+        if not isinstance(candle, dict):
+            continue
         if candle.get("complete") is not True:
             continue
         try:
@@ -136,6 +222,13 @@ def get_candles(timeframe):
             closed.append(item)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
+
+    # Sort by normalized UTC instants, not raw timestamp strings: offsets
+    # can make lexical ordering differ from chronological ordering.
+    closed.sort(key=lambda item: item["dt"])
+    for previous, current in zip(closed, closed[1:]):
+        if current["dt"] == previous["dt"]:
+            raise ValueError(f"Timestamp تکراری در کندل‌های {timeframe}: {current['time']}")
     return closed
 
 
@@ -199,6 +292,22 @@ def atr(candles, period=14):
     return value
 
 
+def validate_candle_sequence(candles, timeframe):
+    if timeframe not in TIMEFRAME_MINUTES:
+        raise ValueError(f"تایم‌فریم نامعتبر است: {timeframe}")
+    if len(candles) < 3:
+        raise ValueError(f"حداقل سه کندل برای اعتبارسنجی {timeframe} لازم است")
+
+    expected = timedelta(minutes=TIMEFRAME_MINUTES[timeframe])
+    recent = candles[-3:]
+    for previous, current in zip(recent, recent[1:]):
+        delta = current["dt"] - previous["dt"]
+        if delta <= timedelta(0):
+            raise ValueError(f"ترتیب زمانی کندل‌های {timeframe} صعودی نیست یا زمان تکراری دارد")
+        if delta != expected:
+            raise ValueError(f"بین سه کندل اخیر {timeframe} شکاف زمانی وجود دارد")
+
+
 def check_freshness(price, candles_by_tf):
     now = datetime.now(timezone.utc)
     if price["status"].upper() != "LIVE":
@@ -208,9 +317,14 @@ def check_freshness(price, candles_by_tf):
     if price_age < -10 or price_age > MAX_PRICE_AGE_SECONDS:
         raise ValueError(f"قیمت قدیمی است؛ عمر داده {int(price_age)} ثانیه")
 
-    for tf, candles in candles_by_tf.items():
+    required_timeframes = ("M1", "M5", "M15")
+    for tf in required_timeframes:
+        if tf not in candles_by_tf:
+            raise ValueError(f"داده تایم‌فریم الزامی {tf} موجود نیست")
+        candles = candles_by_tf[tf]
         if not candles:
             raise ValueError(f"کندل {tf} موجود نیست")
+        validate_candle_sequence(candles, tf)
         last = candles[-1]
         candle_close_time = last["dt"] + timedelta(minutes=TIMEFRAME_MINUTES[tf])
         age = (now - candle_close_time).total_seconds()
@@ -370,13 +484,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    await update.effective_message.reply_text(
-        "🟢 GANJ GOLD فعال است.\n"
-        f"زمان سرور: {now}\n"
-        f"کلید MarketAPI: {'تنظیم شده' if MARKETAPI_KEY else 'تنظیم نشده'}\n"
-        "موتور تحلیل: نسخه آزمایشی v1"
-    )
+    message = await update.effective_message.reply_text("🔎 در حال بررسی اتصال MarketAPI...")
+    try:
+        health = await asyncio.to_thread(get_health_status)
+        p = health["price"]
+        state = "🟢 قیمت زنده و به‌روز" if health["ok"] else "🟠 API پاسخ داد، اما قیمت LIVE یا تازه نیست"
+        await message.edit_text(
+            "🥇 GANJ GOLD | وضعیت سامانه\n\n"
+            f"ربات تلگرام: 🟢 فعال\n"
+            f"MarketAPI: {state}\n"
+            f"نماد: {p['symbol']}\n"
+            f"Bid / Ask: {p['bid']:.2f} / {p['ask']:.2f}\n"
+            f"وضعیت منبع: {p['status']}\n"
+            f"سن قیمت: {health['age']:.0f} ثانیه\n"
+            f"آخرین بررسی: {health['checked_at'].strftime('%H:%M:%S UTC')}\n"
+            "موتور تحلیل: نسخه آزمایشی v1"
+        )
+    except Exception as error:
+        logger.exception("STATUS health check failed")
+        await message.edit_text(
+            "🔴 GANJ GOLD فعال است، اما اتصال قیمت تأیید نشد.\n\n"
+            f"خطا: {str(error)[:350]}\n"
+            "تا رفع خطا، به سیگنال‌های معاملاتی اعتماد نکن."
+        )
 
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -395,7 +525,9 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
         logger.exception("PRICE failed")
         await update.effective_message.reply_text(
-            f"❌ خطا در دریافت قیمت: {type(error).__name__}"
+            "❌ خطا در دریافت قیمت زنده XAUUSD.\n"
+            f"جزئیات: {str(error)[:350]}\n"
+            "تا تأیید اتصال و تازگی داده، از این قیمت برای معامله استفاده نکن."
         )
 
 
@@ -404,9 +536,11 @@ async def candles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "در حال دریافت کندل‌های XAUUSD...\nلطفاً کمی صبر کن."
     )
     try:
-        results = {}
-        for tf in ("M1", "M5", "M15"):
-            results[tf] = await asyncio.to_thread(get_candles, tf)
+        timeframes = ("M1", "M5", "M15")
+        candle_rows = await asyncio.gather(
+            *(asyncio.to_thread(get_candles, tf) for tf in timeframes)
+        )
+        results = dict(zip(timeframes, candle_rows))
 
         lines = ["🥇 GANJ GOLD | گزارش کندل‌ها", ""]
         for tf in ("M1", "M5", "M15"):
@@ -429,7 +563,7 @@ async def candles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("CANDLES failed")
         await message.edit_text(
             "❌ دریافت کندل ناموفق بود.\n"
-            f"نوع خطا: {type(error).__name__}"
+            f"جزئیات: {str(error)[:350]}"
         )
 
 
@@ -439,15 +573,13 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "چهار درخواست داده به MarketAPI ارسال می‌شود."
     )
     try:
-        price_task = asyncio.to_thread(get_gold_price)
-        candle_tasks = {
-            tf: asyncio.to_thread(get_candles, tf)
-            for tf in ("M1", "M5", "M15")
-        }
-        p = await price_task
-        candle_results = {}
-        for tf, task in candle_tasks.items():
-            candle_results[tf] = await task
+        timeframes = ("M1", "M5", "M15")
+        fetched = await asyncio.gather(
+            asyncio.to_thread(get_gold_price),
+            *(asyncio.to_thread(get_candles, tf) for tf in timeframes),
+        )
+        p = fetched[0]
+        candle_results = dict(zip(timeframes, fetched[1:]))
 
         result = build_signal(p, candle_results)
         if result["side"] == "WAIT":
