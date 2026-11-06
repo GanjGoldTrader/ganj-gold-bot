@@ -254,3 +254,12 @@ flowchart TD
 6. Evaluate economic calendar and news providers; build source adapters and corroboration.
 7. Add localization templates without changing analytical calculations.
 8. Update this archive at the end of every substantial project conversation.
+
+### 2026-11-06 — Blitz branch selection confirmed; staging path selected for next step
+- User navigated to Blitz Cloud app `ganj-gold` > Settings > New versions > Change. The branch selector explicitly lists `main (default)` and `codex/diagnostics-healthcheck`.
+- The production app remains configured to build from `main`; the user-visible current deployed version is `fcaaa94` (GitHub main currently resolves to `fcaaa9420213243286dce0b1246435986018dd50`). App was shown Online. No branch change, build, restart, or deployment was performed in this session.
+- GitHub recheck: PR #1 remains open, Draft, base `main`, head `codex/diagnostics-healthcheck`, not merged. Current development branch HEAD is `5d4eb6ec0e477cfb7645f1583daf18a06dc50855`. GitHub Actions push and pull_request runs #? (run IDs 42131225974 and 42131231031) both completed successfully for this exact HEAD.
+- The archive's earlier note mentioning commit `7a729e1e89494dfc395e6d81fba167abea62e7fc` is historical; GitHub comparison confirms it is behind current development HEAD. Current branch pointer and PR metadata take precedence.
+- Decision for safe operational validation: preserve production app `ganj-gold` on `main`; create a separate Blitz staging app from the same repository on `codex/diagnostics-healthcheck`. Use a separate Telegram bot token for staging to avoid two app instances polling the same bot. Do not send tokens in chat or commit them; enter them only in Blitz Environment. MarketAPI usage/rate limits must be considered if both apps fetch concurrently.
+- Next user action: Blitz Apps > Host something new; select GitHub repository `GanjGoldTrader/ganj-gold-bot`, choose branch `codex/diagnostics-healthcheck`, name the app `ganj-gold-staging`. Do not alter production app. Configure staging secrets separately, then test /status, /price, /candles, /signal during an open XAUUSD session.
+- Status: staging app not yet created; no production deployment. Analysis/alerts only; no automatic orders.
